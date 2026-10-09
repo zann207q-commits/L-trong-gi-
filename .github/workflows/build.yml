@@ -2,23 +2,33 @@ name: Build
 on:
   push:
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Unzip project
+        run: unzip -q krypton_work_fixed.zip
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
-      - name: Build from zip
-        run: |
-          mkdir work
-          unzip -q ./*.zip -d work
-          cd "$(dirname "$(find work -name gradlew | head -1)")"
-          chmod +x gradlew
-          ./gradlew build --no-daemon
-      - uses: actions/upload-artifact@v4
+
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          name: astrix-debug
-          path: work/**/build/libs/astrix-debug-*.jar
+          gradle-version: 9.2.0
+
+      - name: Build
+        working-directory: krypton_work
+        run: gradle build --stacktrace 2>&1 | tee ../build.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: krypton-build
+          path: |
+            krypton_work/build/libs/*.jar
+            build.log
