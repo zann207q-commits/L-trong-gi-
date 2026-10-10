@@ -1,4 +1,5 @@
-name: Build
+name: Build Kaze
+
 on:
   push:
   workflow_dispatch:
@@ -9,8 +10,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Unzip project
-        run: unzip -q krypton_work_fixed.zip
+      # Tự tìm project: nếu repo có file .zip thì tự giải nén trên runner, nếu không thì build thẳng thư mục có build.gradle
+      - name: Locate project
+        id: loc
+        run: |
+          set -e
+          ZIP=$(find . -maxdepth 1 -iname '*.zip' | head -n1)
+          if [ -n "$ZIP" ]; then
+            mkdir -p /tmp/proj
+            unzip -q "$ZIP" -d /tmp/proj
+            GRADLE_FILE=$(find /tmp/proj -name build.gradle | head -n1)
+          else
+            GRADLE_FILE=$(find . -name build.gradle | head -n1)
+          fi
+          DIR=$(dirname "$GRADLE_FILE")
+          echo "Project dir: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-java@v4
         with:
@@ -19,16 +34,26 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 9.2.0
+          gradle-version: 9.2.1
 
       - name: Build
-        working-directory: krypton_work
-        run: gradle build --stacktrace 2>&1 | tee ../build.log
+        working-directory: ${{ steps.loc.outputs.dir }}
+        run: |
+          set -o pipefail
+          gradle build --stacktrace --no-daemon 2>&1 | tee build.log
 
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - name: Upload jar
+        if: success()
+        uses: actions/upload-artifact@v4
         with:
-          name: krypton-build
+          name: kaze-jar
           path: |
-            krypton_work/build/libs/*.jar
-            build.log
+            ${{ steps.loc.outputs.dir }}/build/libs/*.jar
+            !${{ steps.loc.outputs.dir }}/build/libs/*-sources.jar
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ steps.loc.outputs.dir }}/build.log
