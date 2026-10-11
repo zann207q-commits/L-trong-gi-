@@ -4,11 +4,11 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: kaze_work
     steps:
       - uses: actions/checkout@v4
+
+      - name: Unzip project
+        run: unzip -q kaze-krispy-donut-finding-with-lucky-finder.zip
 
       - uses: actions/setup-java@v4
         with:
@@ -19,8 +19,11 @@ jobs:
         with:
           build-root-directory: kaze_work
 
-      - run: chmod +x gradlew
-      - run: ./gradlew build --stacktrace
+      - name: Build
+        working-directory: kaze_work
+        run: |
+          chmod +x gradlew
+          ./gradlew build --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
