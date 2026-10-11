@@ -1,8 +1,5 @@
-name: Build Kaze
-
-on:
-  push:
-  workflow_dispatch:
+name: build
+on: [push, workflow_dispatch]
 
 jobs:
   build:
@@ -10,50 +7,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Tự tìm project: nếu repo có file .zip thì tự giải nén trên runner, nếu không thì build thẳng thư mục có build.gradle
-      - name: Locate project
-        id: loc
-        run: |
-          set -e
-          ZIP=$(find . -maxdepth 1 -iname '*.zip' | head -n1)
-          if [ -n "$ZIP" ]; then
-            mkdir -p /tmp/proj
-            unzip -q "$ZIP" -d /tmp/proj
-            GRADLE_FILE=$(find /tmp/proj -name build.gradle | head -n1)
-          else
-            GRADLE_FILE=$(find . -name build.gradle | head -n1)
-          fi
-          DIR=$(dirname "$GRADLE_FILE")
-          echo "Project dir: $DIR"
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
 
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 9.2.1
+        # không đặt gradle-version, để dùng wrapper (9.5.1)
 
-      - name: Build
-        working-directory: ${{ steps.loc.outputs.dir }}
-        run: |
-          set -o pipefail
-          gradle build --stacktrace --no-daemon 2>&1 | tee build.log
+      - run: chmod +x gradlew
+      - run: ./gradlew build --stacktrace
 
-      - name: Upload jar
-        if: success()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: kaze-jar
-          path: |
-            ${{ steps.loc.outputs.dir }}/build/libs/*.jar
-            !${{ steps.loc.outputs.dir }}/build/libs/*-sources.jar
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: ${{ steps.loc.outputs.dir }}/build.log
+          path: build/libs/*.jar
