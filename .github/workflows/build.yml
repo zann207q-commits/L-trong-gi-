@@ -4,6 +4,9 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kaze_work
     steps:
       - uses: actions/checkout@v4
 
@@ -13,7 +16,8 @@ jobs:
           java-version: 21
 
       - uses: gradle/actions/setup-gradle@v4
-        # không đặt gradle-version, để dùng wrapper (9.5.1)
+        with:
+          build-root-directory: kaze_work
 
       - run: chmod +x gradlew
       - run: ./gradlew build --stacktrace
@@ -21,4 +25,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: kaze-jar
-          path: build/libs/*.jar
+          path: kaze_work/build/libs/*.jar
