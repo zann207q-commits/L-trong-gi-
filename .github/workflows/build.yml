@@ -18,13 +18,30 @@ jobs:
           fi
           echo "Using $ZIP"
           mkdir -p project
-          unzip -q -o "$ZIP" -d project
-          # Nếu zip có 1 thư mục bọc ngoài thì đi vào trong
+          # Giải nén bằng Python: xử lý được cả zip nén từ Windows (dấu \)
+          python3 - "$ZIP" <<'PY'
+          import sys, zipfile, os
+          z = zipfile.ZipFile(sys.argv[1])
+          for info in z.infolist():
+              name = info.filename.replace('\\', '/')
+              dest = os.path.join('project', name)
+              if name.endswith('/'):
+                  os.makedirs(dest, exist_ok=True)
+              else:
+                  os.makedirs(os.path.dirname(dest), exist_ok=True)
+                  with open(dest, 'wb') as f:
+                      f.write(z.read(info))
+          PY
+          # Nếu zip có 1 thư mục bọc ngoài thì kéo nội dung ra project/
           if [ ! -f project/build.gradle ]; then
-            INNER=$(dirname "$(find project -maxdepth 3 -name build.gradle | head -n 1)")
-            [ -n "$INNER" ] && cp -a "$INNER"/. project/
+            F=$(find project -maxdepth 3 -name build.gradle | head -n 1)
+            if [ -z "$F" ]; then echo "Error: không thấy build.gradle trong zip"; exit 1; fi
+            cp -a "$(dirname "$F")"/. project/
           fi
+          chmod -R u+rwX project
           chmod +x project/gradlew
+          echo "--- project layout ---"
+          find project -maxdepth 4 -not -path '*/.git/*' | head -60
 
       - uses: actions/setup-java@v4
         with:
@@ -32,12 +49,19 @@ jobs:
           java-version: 21
 
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-home-cache-cleanup: false
 
       - name: Build
         working-directory: project
-        run: ./gradlew build --no-daemon
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Show jars
+        run: ls -la project/build/libs
 
       - uses: actions/upload-artifact@v4
         with:
           name: kingmc-raidkit
-          path: project/build/libs/*.jar
+          path: |
+            project/build/libs/*.jar
+            !project/build/libs/*-sources.jar
