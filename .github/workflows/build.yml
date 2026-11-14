@@ -12,20 +12,19 @@ jobs:
 
       - name: Unzip project
         run: |
-          # Tự tìm file zip trong repo, không phụ thuộc tên chính xác
-          ZIP=$(find . -maxdepth 2 -iname 'ACCollectorV8*.zip' -not -path './.git/*' | head -n 1)
+          ZIP=$(ls -1 *.zip 2>/dev/null | head -n 1)
           if [ -z "$ZIP" ]; then
-            echo "::error::Không tìm thấy file ACCollectorV8*.zip trong repo. File hiện có:"
-            ls -la
-            exit 1
+            echo "Error: không tìm thấy file .zip trong repo"; ls -la; exit 1
           fi
-          echo "Dùng file: $ZIP"
-          mkdir -p src_build
-          unzip -q -o "$ZIP" -d src_build
-          # zip có thư mục gốc acv8/ -> tìm thư mục chứa build.gradle
-          PROJ=$(dirname "$(find src_build -name build.gradle -not -path '*/node_modules/*' | head -n 1)")
-          echo "PROJECT_DIR=$PROJ" >> "$GITHUB_ENV"
-          echo "Project dir: $PROJ"
+          echo "Using $ZIP"
+          mkdir -p project
+          unzip -q -o "$ZIP" -d project
+          # Nếu zip có 1 thư mục bọc ngoài thì đi vào trong
+          if [ ! -f project/build.gradle ]; then
+            INNER=$(dirname "$(find project -maxdepth 3 -name build.gradle | head -n 1)")
+            [ -n "$INNER" ] && cp -a "$INNER"/. project/
+          fi
+          chmod +x project/gradlew
 
       - uses: actions/setup-java@v4
         with:
@@ -33,14 +32,12 @@ jobs:
           java-version: 21
 
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.2.0"
 
       - name: Build
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle build --no-daemon --stacktrace
+        working-directory: project
+        run: ./gradlew build --no-daemon
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ACCollectorV8
-          path: ${{ env.PROJECT_DIR }}/build/libs/*.jar
+          name: kingmc-raidkit
+          path: project/build/libs/*.jar
