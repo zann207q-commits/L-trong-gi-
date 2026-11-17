@@ -1,67 +1,231 @@
-name: build
+
+name: Auto Unzip And Build
 
 on:
   push:
+    branches:
+      - "**"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      # 1. Download repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Unzip project
-        run: |
-          ZIP=$(ls -1 *.zip 2>/dev/null | head -n 1)
-          if [ -z "$ZIP" ]; then
-            echo "Error: không tìm thấy file .zip trong repo"; ls -la; exit 1
-          fi
-          echo "Using $ZIP"
-          mkdir -p project
-          # Giải nén bằng Python: xử lý được cả zip nén từ Windows (dấu \)
-          python3 - "$ZIP" <<'PY'
-          import sys, zipfile, os
-          z = zipfile.ZipFile(sys.argv[1])
-          for info in z.infolist():
-              name = info.filename.replace('\\', '/')
-              dest = os.path.join('project', name)
-              if name.endswith('/'):
-                  os.makedirs(dest, exist_ok=True)
-              else:
-                  os.makedirs(os.path.dirname(dest), exist_ok=True)
-                  with open(dest, 'wb') as f:
-                      f.write(z.read(info))
-          PY
-          # Nếu zip có 1 thư mục bọc ngoài thì kéo nội dung ra project/
-          if [ ! -f project/build.gradle ]; then
-            F=$(find project -maxdepth 3 -name build.gradle | head -n 1)
-            if [ -z "$F" ]; then echo "Error: không thấy build.gradle trong zip"; exit 1; fi
-            cp -a "$(dirname "$F")"/. project/
-          fi
-          chmod -R u+rwX project
-          chmod +x project/gradlew
-          echo "--- project layout ---"
-          find project -maxdepth 4 -not -path '*/.git/*' | head -60
-
-      - uses: actions/setup-java@v4
+      # 2. Install Java
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: "21"
+          cache: gradle
 
-      - uses: gradle/actions/setup-gradle@v4
+      # 3. Install fallback Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-home-cache-cleanup: false
+          gradle-version: "8.14.3"
 
-      - name: Build
-        working-directory: project
-        run: ./gradlew build --no-daemon --stacktrace
+      # 4. Automatically find and extract ZIP files
+      - name: Auto Extract ZIP Files
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Show jars
-        run: ls -la project/build/libs
+          mkdir -p _autobuild/unpacked artifacts
 
-      - uses: actions/upload-artifact@v4
+          python3 <<'PY'
+          import os
+          import zipfile
+
+          root = os.getcwd()
+          output = os.path.join(root, "_autobuild", "unpacked")
+
+          archives = []
+
+          for current, dirs, files in os.walk(root):
+              dirs[:] = [
+                  d for d in dirs
+                  if d not in (
+                      ".git", ".gradle",
+                      "_autobuild", "artifacts"
+                  )
+              ]
+
+              for filename in files:
+                  if filename.lower().endswith(".zip"):
+                      archives.append(
+                          os.path.join(current, filename)
+                      )
+
+          archives.sort()
+
+          if not archives:
+              print("No ZIP found. Checking repository directly.")
+
+          for index, archive in enumerate(archives):
+              destination = os.path.join(
+                  output, f"archive_{index:03d}"
+              )
+
+              os.makedirs(destination, exist_ok=True)
+
+              print("Extracting:", archive)
+
+              with zipfile.ZipFile(archive) as z:
+                  for item in z.infolist():
+                      target = os.path.realpath(
+                          os.path.join(destination, item.filename)
+                      )
+
+                      if os.path.commonpath(
+                          [destination, target]
+                      ) != os.path.realpath(destination):
+                          raise RuntimeError(
+                              "Unsafe ZIP path: " + item.filename
+                          )
+
+                  z.extractall(destination)
+
+              print("Extracted:", destination)
+
+          print("Extraction complete.")
+          PY
+
+      # 5. Automatically detect Gradle projects
+      - name: Find Gradle Projects
+        id: projects
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' PROJECT_FILES < <(
+            find . -type f \
+              \( -name "build.gradle" -o -name "build.gradle.kts" \) \
+              -not -path "./.git/*" \
+              -not -path "./.gradle/*" \
+              -not -path "./artifacts/*" \
+              -not -path "*/build/*" \
+              -print0
+          )
+
+          if [ "${#PROJECT_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: No Gradle project found."
+            find . -maxdepth 5 -type f | head -150
+            exit 1
+          fi
+
+          echo "Found ${#PROJECT_FILES[@]} Gradle build file(s)."
+
+          : > _autobuild/projects.txt
+
+          for FILE in "${PROJECT_FILES[@]}"; do
+            DIR=$(dirname "$FILE")
+            REAL_DIR=$(realpath "$DIR")
+
+            if ! grep -Fxq "$REAL_DIR" _autobuild/projects.txt; then
+              echo "$REAL_DIR" >> _autobuild/projects.txt
+              echo "Project: $REAL_DIR"
+            fi
+          done
+
+      # 6. Automatically build every detected project
+      - name: Auto Build Projects
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INDEX=0
+
+          while IFS= read -r PROJECT_DIR; do
+            [ -d "$PROJECT_DIR" ] || continue
+
+            INDEX=$((INDEX + 1))
+
+            echo "================================"
+            echo "BUILD PROJECT $INDEX"
+            echo "Directory: $PROJECT_DIR"
+            echo "================================"
+
+            cd "$PROJECT_DIR"
+
+            if [ -f "./gradlew" ]; then
+              echo "Using Gradle Wrapper"
+              chmod +x ./gradlew
+              ./gradlew clean build --no-daemon
+
+            elif [ -f "./gradlew.bat" ]; then
+              echo "Windows wrapper only; using installed Gradle"
+              gradle clean build --no-daemon
+
+            else
+              echo "No Gradle Wrapper. Using installed Gradle."
+              gradle clean build --no-daemon
+            fi
+
+            cd "$GITHUB_WORKSPACE"
+
+          done < _autobuild/projects.txt
+
+      # 7. Automatically collect generated JAR files
+      - name: Collect All JAR Files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+
+          INDEX=0
+
+          while IFS= read -r PROJECT_DIR; do
+            [ -d "$PROJECT_DIR" ] || continue
+
+            while IFS= read -r -d '' JAR; do
+              NAME=$(basename "$JAR")
+
+              case "$NAME" in
+                *-sources.jar|*-javadoc.jar)
+                  echo "Skipping source archive: $NAME"
+                  continue
+                  ;;
+              esac
+
+              INDEX=$((INDEX + 1))
+
+              cp "$JAR" "artifacts/${INDEX}_${NAME}"
+
+              echo "Collected: $NAME"
+
+            done < <(
+              find "$PROJECT_DIR" \
+                -type f \
+                -path "*/build/libs/*.jar" \
+                -print0
+            )
+
+          done < _autobuild/projects.txt
+
+          if [ "$INDEX" -eq 0 ]; then
+            echo "ERROR: No JAR files generated."
+            exit 1
+          fi
+
+          echo "Total JAR files: $INDEX"
+
+          ls -lh artifacts/
+
+      # 8. Upload JAR artifacts
+      - name: Upload JAR Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: kingmc-raidkit
-          path: |
-            project/build/libs/*.jar
-            !project/build/libs/*-sources.jar
+          name: Built-JAR-Files
+          path: artifacts/*.jar
+          if-no-files-found: error
+          retention-days: 14
