@@ -20,6 +20,8 @@ jobs:
           java-version: 21
 
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
 
       - name: Unzip and locate project
         shell: bash
@@ -30,22 +32,45 @@ jobs:
             echo "Unzipping: $ZIP"
             rm -rf _src && mkdir _src
             unzip -q -o "$ZIP" -d _src
+            # unzip nested zips (up to 2 levels)
+            for i in 1 2; do
+              find _src -iname '*.zip' | while read -r Z; do
+                D="${Z%.zip}_unz"
+                [ -d "$D" ] || { mkdir -p "$D"; unzip -q -o "$Z" -d "$D" || true; }
+              done
+            done
             SRC=_src
           else
             SRC=.
           fi
+
+          echo "---- project tree ----"
+          find "$SRC" -maxdepth 4 -not -path '*/.git/*' | head -n 80
+          echo "----------------------"
+
           GW=$(find "$SRC" -name gradlew -not -path '*/.git/*' | head -n1)
-          if [ -z "$GW" ]; then echo "::error::gradlew not found"; exit 1; fi
-          DIR=$(cd "$(dirname "$GW")" && pwd)
+          if [ -n "$GW" ]; then
+            DIR=$(cd "$(dirname "$GW")" && pwd)
+            chmod +x "$DIR/gradlew"
+            echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
+          else
+            BF=$(find "$SRC" \( -name 'settings.gradle' -o -name 'settings.gradle.kts' -o -name 'build.gradle' -o -name 'build.gradle.kts' \) -not -path '*/.git/*' | awk '{print length, $0}' | sort -n | head -n1 | cut -d' ' -f2-)
+            if [ -z "$BF" ]; then
+              echo "::error::No gradlew or build.gradle found in the zip"
+              exit 1
+            fi
+            DIR=$(cd "$(dirname "$BF")" && pwd)
+            echo "::warning::gradlew missing, using installed Gradle 8.14.3"
+            echo "GRADLE_CMD=gradle" >> "$GITHUB_ENV"
+          fi
           echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
-          chmod +x "$DIR/gradlew"
           mkdir -p "$GITHUB_WORKSPACE/out/normal" "$GITHUB_WORKSPACE/out/obf"
 
       - name: Detect obfuscation task
         shell: bash
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          TASK=$(./gradlew tasks --all --no-daemon -q 2>/dev/null \
+          TASK=$($GRADLE_CMD tasks --all --no-daemon -q 2>/dev/null \
             | awk '{print $1}' \
             | grep -iE '^(obf|obfuscat|qprotect|proguard)' | head -n1 || true)
           echo "OBF_TASK=$TASK" >> "$GITHUB_ENV"
@@ -57,9 +82,9 @@ jobs:
         run: |
           set -e
           if [ -n "$OBF_TASK" ]; then
-            ./gradlew build -x test -x "$OBF_TASK" --no-daemon --stacktrace
+            $GRADLE_CMD build -x test -x "$OBF_TASK" --no-daemon --stacktrace
           else
-            ./gradlew build -x test --no-daemon --stacktrace
+            $GRADLE_CMD build -x test --no-daemon --stacktrace
           fi
           find build -name '*.jar' \
             ! -name '*-sources*' ! -name '*-dev*' ! -name '*-javadoc*' \
@@ -72,14 +97,14 @@ jobs:
         run: |
           set -e
           rm -rf build/libs
-          ./gradlew "$OBF_TASK" -x test --no-daemon --stacktrace
+          $GRADLE_CMD "$OBF_TASK" -x test --no-daemon --stacktrace
           find build -name '*.jar' \
             ! -name '*-sources*' ! -name '*-dev*' ! -name '*-javadoc*' \
             ! -path '*/tmp/*' -exec cp -v {} "$GITHUB_WORKSPACE/out/obf/" \;
 
       - name: Warn if no obf task
         if: env.OBF_TASK == ''
-        run: echo "::warning::No obf task found. Check that the qProtect plugin is applied in build.gradle."
+        run: echo "::warning::No obf task found. Check that the obf plugin is applied in build.gradle."
 
       - uses: actions/upload-artifact@v4
         with:
