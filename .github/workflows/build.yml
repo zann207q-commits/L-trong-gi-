@@ -1,251 +1,95 @@
-
-name: ACCollector Universal Auto Build
+name: Build
 
 on:
-  push:
-    branches:
-      - "**"
   workflow_dispatch:
+  push:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Extract And Build
     runs-on: ubuntu-latest
-
+    timeout-minutes: 45
     steps:
+      - uses: actions/checkout@v4
 
-      # 1. Checkout
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      # 2. Java 21
-      - name: Setup Java 21
-        uses: actions/setup-java@v5
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: 21
 
-      # 3. Find and extract ZIP files
-      - name: Auto Extract ZIP
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unzip and locate project
         shell: bash
         run: |
-          set -euo pipefail
-
-          mkdir -p _extracted artifacts
-
-          python3 <<'PY'
-          import os
-          import zipfile
-
-          root = os.getcwd()
-          output = os.path.join(root, "_extracted")
-
-          archives = []
-
-          for current, dirs, files in os.walk(root):
-              dirs[:] = [
-                  d for d in dirs
-                  if d not in (
-                      ".git", ".gradle",
-                      "_extracted", "artifacts"
-                  )
-              ]
-
-              for name in files:
-                  if name.lower().endswith(".zip"):
-                      archives.append(
-                          os.path.join(current, name)
-                      )
-
-          archives.sort()
-
-          if not archives:
-              raise SystemExit(
-                  "ERROR: No ZIP files found in repository."
-              )
-
-          for i, archive in enumerate(archives):
-              destination = os.path.join(
-                  output, f"archive_{i:03d}"
-              )
-
-              os.makedirs(destination, exist_ok=True)
-
-              print("Extracting:", archive)
-
-              with zipfile.ZipFile(archive) as z:
-                  base = os.path.realpath(destination)
-
-                  for item in z.infolist():
-                      target = os.path.realpath(
-                          os.path.join(destination, item.filename)
-                      )
-
-                      if os.path.commonpath(
-                          [base, target]
-                      ) != base:
-                          raise RuntimeError(
-                              "Unsafe ZIP path: " + item.filename
-                          )
-
-                  z.extractall(destination)
-
-          print("Extraction completed.")
-          PY
-
-      # 4. Detect Gradle projects
-      - name: Auto Detect Projects
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          import os
-
-          root = os.getcwd()
-          excluded = {
-              ".git", ".gradle", "build",
-              "artifacts", ".github"
-          }
-
-          candidates = set()
-
-          for current, dirs, files in os.walk(root):
-              dirs[:] = [
-                  d for d in dirs
-                  if d not in excluded
-              ]
-
-              if (
-                  "build.gradle" in files
-                  or "build.gradle.kts" in files
-              ):
-                  candidates.add(os.path.realpath(current))
-
-          projects = []
-
-          for path in sorted(candidates, key=len):
-              if not any(
-                  path == parent
-                  or path.startswith(parent + os.sep)
-                  for parent in projects
-              ):
-                  projects.append(path)
-
-          if not projects:
-              raise SystemExit(
-                  "ERROR: Gradle project not found."
-              )
-
-          os.makedirs("_autobuild", exist_ok=True)
-
-          with open("_autobuild_projects.txt", "w") as f:
-              for project in projects:
-                  print("FOUND PROJECT:", project)
-                  f.write(project + "\n")
-
-          print("Total projects:", len(projects))
-          PY
-
-      # 5. Install Gradle
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.14.3"
-
-      # 6. Verify environment
-      - name: Check Environment
-        run: |
-          java -version
-          gradle --version
-
-      # 7. Build projects
-      - name: Auto Build Projects
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          INDEX=0
-
-          while IFS= read -r PROJECT_DIR; do
-            [ -n "$PROJECT_DIR" ] || continue
-
-            INDEX=$((INDEX + 1))
-
-            echo "================================"
-            echo "BUILDING PROJECT $INDEX"
-            echo "$PROJECT_DIR"
-            echo "================================"
-
-            cd "$PROJECT_DIR"
-
-            if [ -f "./gradlew" ]; then
-              chmod +x ./gradlew
-              ./gradlew clean build \
-                --no-daemon --stacktrace
-            else
-              gradle clean build \
-                --no-daemon --stacktrace
-            fi
-
-            cd "$GITHUB_WORKSPACE"
-
-            echo "BUILD SUCCESS: $PROJECT_DIR"
-
-          done < _autobuild_projects.txt
-
-      # 8. Collect JAR
-      - name: Collect JAR Files
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p artifacts
-          INDEX=0
-
-          while IFS= read -r PROJECT_DIR; do
-            [ -n "$PROJECT_DIR" ] || continue
-
-            while IFS= read -r -d '' JAR; do
-              NAME=$(basename "$JAR")
-
-              case "$NAME" in
-                *-sources.jar|*-javadoc.jar)
-                  continue
-                  ;;
-              esac
-
-              INDEX=$((INDEX + 1))
-
-              cp "$JAR" "artifacts/${INDEX}_${NAME}"
-
-              echo "JAR FOUND: $NAME"
-
-            done < <(
-              find "$PROJECT_DIR" \
-                -type f \
-                -path "*/build/libs/*.jar" \
-                -print0
-            )
-
-          done < _autobuild_projects.txt
-
-          if [ "$INDEX" -eq 0 ]; then
-            echo "ERROR: No JAR generated."
-            exit 1
+          set -e
+          ZIP=$(find . -maxdepth 1 -iname '*.zip' | head -n1)
+          if [ -n "$ZIP" ]; then
+            echo "Unzipping: $ZIP"
+            rm -rf _src && mkdir _src
+            unzip -q -o "$ZIP" -d _src
+            SRC=_src
+          else
+            SRC=.
           fi
+          GW=$(find "$SRC" -name gradlew -not -path '*/.git/*' | head -n1)
+          if [ -z "$GW" ]; then echo "::error::gradlew not found"; exit 1; fi
+          DIR=$(cd "$(dirname "$GW")" && pwd)
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          chmod +x "$DIR/gradlew"
+          mkdir -p "$GITHUB_WORKSPACE/out/normal" "$GITHUB_WORKSPACE/out/obf"
 
-          echo "TOTAL JAR: $INDEX"
-          ls -lh artifacts/
+      - name: Detect obfuscation task
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          TASK=$(./gradlew tasks --all --no-daemon -q 2>/dev/null \
+            | awk '{print $1}' \
+            | grep -iE '^(obf|obfuscat|qprotect|proguard)' | head -n1 || true)
+          echo "OBF_TASK=$TASK" >> "$GITHUB_ENV"
+          echo "Obf task: '${TASK:-none}'"
 
-      # 9. Upload
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Build normal
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          if [ -n "$OBF_TASK" ]; then
+            ./gradlew build -x test -x "$OBF_TASK" --no-daemon --stacktrace
+          else
+            ./gradlew build -x test --no-daemon --stacktrace
+          fi
+          find build -name '*.jar' \
+            ! -name '*-sources*' ! -name '*-dev*' ! -name '*-javadoc*' \
+            ! -path '*/tmp/*' -exec cp -v {} "$GITHUB_WORKSPACE/out/normal/" \;
+
+      - name: Build obf
+        if: env.OBF_TASK != ''
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          rm -rf build/libs
+          ./gradlew "$OBF_TASK" -x test --no-daemon --stacktrace
+          find build -name '*.jar' \
+            ! -name '*-sources*' ! -name '*-dev*' ! -name '*-javadoc*' \
+            ! -path '*/tmp/*' -exec cp -v {} "$GITHUB_WORKSPACE/out/obf/" \;
+
+      - name: Warn if no obf task
+        if: env.OBF_TASK == ''
+        run: echo "::warning::No obf task found. Check that the qProtect plugin is applied in build.gradle."
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: ACCollector-Build
-          path: artifacts/*.jar
+          name: normal
+          path: out/normal/*.jar
           if-no-files-found: error
-          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: env.OBF_TASK != ''
+        with:
+          name: obf
+          path: out/obf/*.jar
+          if-no-files-found: error
