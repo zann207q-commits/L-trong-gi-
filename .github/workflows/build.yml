@@ -1,5 +1,5 @@
 
-name: ACCollector Auto Build
+name: ACCollector Universal Auto Build
 
 on:
   push:
@@ -12,36 +12,36 @@ permissions:
 
 jobs:
   build:
-    name: Auto Unzip And Build
+    name: Extract And Build
     runs-on: ubuntu-latest
 
     steps:
 
-      # STEP 1: Download repository
+      # 1. Checkout
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # STEP 2: Install Java 21 (NO GRADLE CACHE)
+      # 2. Java 21
       - name: Setup Java 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
 
-      # STEP 3: Automatically extract every ZIP
+      # 3. Find and extract ZIP files
       - name: Auto Extract ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p _autobuild/unpacked artifacts
+          mkdir -p _extracted artifacts
 
           python3 <<'PY'
           import os
           import zipfile
 
           root = os.getcwd()
-          output = os.path.join(root, "_autobuild/unpacked")
+          output = os.path.join(root, "_extracted")
 
           archives = []
 
@@ -50,20 +50,22 @@ jobs:
                   d for d in dirs
                   if d not in (
                       ".git", ".gradle",
-                      "_autobuild", "artifacts"
+                      "_extracted", "artifacts"
                   )
               ]
 
-              for filename in files:
-                  if filename.lower().endswith(".zip"):
+              for name in files:
+                  if name.lower().endswith(".zip"):
                       archives.append(
-                          os.path.join(current, filename)
+                          os.path.join(current, name)
                       )
 
           archives.sort()
 
           if not archives:
-              print("No ZIP found. Searching repository directly.")
+              raise SystemExit(
+                  "ERROR: No ZIP files found in repository."
+              )
 
           for i, archive in enumerate(archives):
               destination = os.path.join(
@@ -72,7 +74,7 @@ jobs:
 
               os.makedirs(destination, exist_ok=True)
 
-              print(f"Extracting: {archive}")
+              print("Extracting:", archive)
 
               with zipfile.ZipFile(archive) as z:
                   base = os.path.realpath(destination)
@@ -91,11 +93,11 @@ jobs:
 
                   z.extractall(destination)
 
-          print("All ZIP files extracted.")
+          print("Extraction completed.")
           PY
 
-      # STEP 4: Find all Gradle project roots
-      - name: Auto Detect Gradle Projects
+      # 4. Detect Gradle projects
+      - name: Auto Detect Projects
         shell: bash
         run: |
           set -euo pipefail
@@ -104,15 +106,18 @@ jobs:
           import os
 
           root = os.getcwd()
-          ignored = {
+          excluded = {
               ".git", ".gradle", "build",
-              "artifacts", "_autobuild"
+              "artifacts", ".github"
           }
 
           candidates = set()
 
           for current, dirs, files in os.walk(root):
-              dirs[:] = [d for d in dirs if d not in ignored]
+              dirs[:] = [
+                  d for d in dirs
+                  if d not in excluded
+              ]
 
               if (
                   "build.gradle" in files
@@ -120,47 +125,45 @@ jobs:
               ):
                   candidates.add(os.path.realpath(current))
 
-          # Remove nested Gradle subprojects when a parent
-          # already contains the root build file.
           projects = []
 
           for path in sorted(candidates, key=len):
               if not any(
-                  path.startswith(parent + os.sep)
+                  path == parent
+                  or path.startswith(parent + os.sep)
                   for parent in projects
               ):
                   projects.append(path)
 
           if not projects:
               raise SystemExit(
-                  "ERROR: No build.gradle or build.gradle.kts found."
+                  "ERROR: Gradle project not found."
               )
 
           os.makedirs("_autobuild", exist_ok=True)
 
-          with open("_autobuild/projects.txt", "w") as f:
-              for path in projects:
-                  print("FOUND:", path)
-                  f.write(path + "\n")
+          with open("_autobuild_projects.txt", "w") as f:
+              for project in projects:
+                  print("FOUND PROJECT:", project)
+                  f.write(project + "\n")
 
           print("Total projects:", len(projects))
           PY
 
-      # STEP 5: Install Gradle
+      # 5. Install Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.14.3"
 
-      # STEP 6: Verify build environment
-      - name: Check Build Environment
-        shell: bash
+      # 6. Verify environment
+      - name: Check Environment
         run: |
           java -version
           gradle --version
 
-      # STEP 7: Build all detected projects
-      - name: Auto Build
+      # 7. Build projects
+      - name: Auto Build Projects
         shell: bash
         run: |
           set -euo pipefail
@@ -172,36 +175,35 @@ jobs:
 
             INDEX=$((INDEX + 1))
 
-            echo "=================================="
-            echo "BUILD PROJECT $INDEX"
-            echo "PROJECT: $PROJECT_DIR"
-            echo "=================================="
+            echo "================================"
+            echo "BUILDING PROJECT $INDEX"
+            echo "$PROJECT_DIR"
+            echo "================================"
 
             cd "$PROJECT_DIR"
 
             if [ -f "./gradlew" ]; then
-              echo "Using project Gradle Wrapper"
               chmod +x ./gradlew
-              ./gradlew clean build --no-daemon --stacktrace
+              ./gradlew clean build \
+                --no-daemon --stacktrace
             else
-              echo "Using installed Gradle"
-              gradle clean build --no-daemon --stacktrace
+              gradle clean build \
+                --no-daemon --stacktrace
             fi
 
             cd "$GITHUB_WORKSPACE"
 
-            echo "PROJECT $INDEX BUILD SUCCESS"
+            echo "BUILD SUCCESS: $PROJECT_DIR"
 
-          done < _autobuild/projects.txt
+          done < _autobuild_projects.txt
 
-      # STEP 8: Find and collect generated JAR files
+      # 8. Collect JAR
       - name: Collect JAR Files
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p artifacts
-
           INDEX=0
 
           while IFS= read -r PROJECT_DIR; do
@@ -212,7 +214,6 @@ jobs:
 
               case "$NAME" in
                 *-sources.jar|*-javadoc.jar)
-                  echo "Skipping: $NAME"
                   continue
                   ;;
               esac
@@ -221,7 +222,7 @@ jobs:
 
               cp "$JAR" "artifacts/${INDEX}_${NAME}"
 
-              echo "Collected: $NAME"
+              echo "JAR FOUND: $NAME"
 
             done < <(
               find "$PROJECT_DIR" \
@@ -230,19 +231,17 @@ jobs:
                 -print0
             )
 
-          done < _autobuild/projects.txt
+          done < _autobuild_projects.txt
 
           if [ "$INDEX" -eq 0 ]; then
-            echo "ERROR: No JAR generated!"
+            echo "ERROR: No JAR generated."
             exit 1
           fi
 
-          echo "=================================="
           echo "TOTAL JAR: $INDEX"
           ls -lh artifacts/
-          echo "=================================="
 
-      # STEP 9: Upload all JAR files
+      # 9. Upload
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
